@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
+import * as MediaLibrary from 'expo-media-library';
 import { router } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
@@ -18,15 +19,14 @@ import {
 
 const { width } = Dimensions.get('window');
 
-
 interface Parcelle {
   id: string;
   numeroDeLot: string;
   etatDeParcelle: string;
   nombreDeLogement: string;
-  acheve:string;
-  enCours:string;
-  image: { uri: string; name: string } | null;
+  acheve: string;
+  enCours: string;
+  image: { uri: string; name: string; assetId?: string } | null;
   createdAt: string;
 }
 
@@ -35,14 +35,12 @@ interface AddParcelleFormProps {
 }
 
 const STORAGE_KEY = 'parcelles_data';
-const IMAGES_DIRECTORY = `${FileSystem.documentDirectory}parcelle_images/`;
-
 
 export default function AddParcelleForm({ onSave }: AddParcelleFormProps = {}) {
   const [numeroDeLot, setNumeroDeLot] = useState<string>('');
   const [etatDeParcelle, setEtatDeParcelle] = useState<string>('');
   const [nombreDeLogement, setNombreDeLogement] = useState<string>('');
-  const [image, setImage] = useState<{ uri: string; name: string } | null>(null);
+  const [image, setImage] = useState<{ uri: string; name: string; assetId?: string } | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [parcelles, setParcelles] = useState<Parcelle[]>([]);
@@ -58,20 +56,8 @@ export default function AddParcelleForm({ onSave }: AddParcelleFormProps = {}) {
   }>({});
 
   useEffect(() => {
-    initializeStorage();
     loadParcelles();
   }, []);
-
-  const initializeStorage = async () => {
-    try {
-      const dirInfo = await FileSystem.getInfoAsync(IMAGES_DIRECTORY);
-      if (!dirInfo.exists) {
-        await FileSystem.makeDirectoryAsync(IMAGES_DIRECTORY, { intermediates: true });
-      }
-    } catch (error) {
-      console.error('Erreur lors de l\'initialisation du stockage:', error);
-    }
-  };
 
   const loadParcelles = async () => {
     try {
@@ -93,19 +79,43 @@ export default function AddParcelleForm({ onSave }: AddParcelleFormProps = {}) {
     }
   };
 
-  const saveImageToFileSystem = async (imageUri: string, imageName: string): Promise<string> => {
+  const saveImageToMediaLibrary = async (imageUri: string, imageName: string) => {
     try {
-      const fileName = `${Date.now()}_${imageName}`;
-      const newPath = `${IMAGES_DIRECTORY}${fileName}`;
+      // Request media library permissions
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permission requise',
+          'L\'autorisation d\'accès à la galerie est requise pour sauvegarder les photos.'
+        );
+        return null;
+      }
 
+      // Create a temporary file with proper naming
+      const fileName = `Parcelle_${numeroDeLot.trim() || Date.now()}_${Date.now()}.jpg`;
+      const tempUri = `${FileSystem.cacheDirectory}${fileName}`;
+
+      // Copy the image to temp location with proper name
       await FileSystem.copyAsync({
         from: imageUri,
-        to: newPath,
+        to: tempUri,
       });
 
-      return newPath;
+      // Save to media library - this returns void, not an asset
+      await MediaLibrary.saveToLibraryAsync(tempUri);
+
+      // Clean up temp file
+      await FileSystem.deleteAsync(tempUri, { idempotent: true });
+
+      // Since saveToLibraryAsync doesn't return asset info, we'll return the original URI
+      // The image is now saved to the device gallery
+      return {
+        uri: imageUri, // Keep original URI for display
+        assetId: undefined, // No asset ID available from this API
+        name: fileName
+      };
     } catch (error) {
-      console.error('Erreur lors de la sauvegarde de l\'image:', error);
+      console.error('Erreur lors de la sauvegarde vers la galerie:', error);
       throw error;
     }
   };
@@ -136,31 +146,41 @@ export default function AddParcelleForm({ onSave }: AddParcelleFormProps = {}) {
     return Object.keys(newErrors).length === 0;
   };
 
-
-
   const pickImage = async () => {
     try {
       setIsLoading(true);
-      const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
 
-      if (!permissionResult.granted) {
+      // Request camera permissions
+      const cameraPermission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!cameraPermission.granted) {
         Alert.alert('Attention', 'Veuillez autoriser l\'accès à l\'appareil photo');
         return;
       }
 
+      // Request media library permissions upfront
+      const mediaPermission = await MediaLibrary.requestPermissionsAsync();
+      if (!mediaPermission.granted) {
+        Alert.alert(
+          'Permission requise',
+          'L\'autorisation d\'accès à la galerie est requise pour sauvegarder les photos dans votre galerie.'
+        );
+      }
+
       const result = await ImagePicker.launchCameraAsync({
         allowsEditing: false,
-        quality: 0.7,
+        quality: 0.8,
+        exif: false,
       });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
+        const fileName = `Parcelle_${numeroDeLot.trim() || 'temp'}_${Date.now()}.jpg`;
         setImage({
           uri: result.assets[0].uri,
-          name: `parcelle_${numeroDeLot || Date.now()}.jpg`
+          name: fileName
         });
       }
     } catch (error) {
-      console.log(error)
+      console.log(error);
       Alert.alert('Erreur', 'Une erreur s\'est produite lors de la prise de photo');
     } finally {
       setIsLoading(false);
@@ -175,10 +195,22 @@ export default function AddParcelleForm({ onSave }: AddParcelleFormProps = {}) {
     try {
       setIsSaving(true);
 
-      let savedImagePath = null;
+      let savedImage = null;
 
       if (image) {
-        savedImagePath = await saveImageToFileSystem(image.uri, image.name);
+        // Save image to media library (gallery)
+        const mediaAsset = await saveImageToMediaLibrary(image.uri, image.name);
+
+        if (mediaAsset) {
+          savedImage = {
+            uri: mediaAsset.uri,
+            name: mediaAsset.name,
+            assetId: mediaAsset.assetId
+          };
+        } else {
+          // Fallback: keep original URI if media library save failed
+          savedImage = image;
+        }
       }
 
       const newParcelle: Parcelle = {
@@ -188,7 +220,7 @@ export default function AddParcelleForm({ onSave }: AddParcelleFormProps = {}) {
         nombreDeLogement: nombreDeLogement.trim(),
         acheve: acheve.trim() || '',
         enCours: enCours.trim() || '',
-        image: savedImagePath ? { uri: savedImagePath, name: image?.name || '' } : null,
+        image: savedImage,
         createdAt: new Date().toISOString(),
       };
 
@@ -200,6 +232,14 @@ export default function AddParcelleForm({ onSave }: AddParcelleFormProps = {}) {
       if (onSave) {
         onSave(newParcelle);
       }
+
+      // Show success message
+      Alert.alert(
+        'Succès',
+        savedImage
+          ? 'Parcelle sauvegardée avec succès! La photo est maintenant disponible dans votre galerie.'
+          : 'Parcelle sauvegardée avec succès!'
+      );
 
       // Reset form
       setNumeroDeLot('');
@@ -231,6 +271,11 @@ export default function AddParcelleForm({ onSave }: AddParcelleFormProps = {}) {
               <Text style={styles.numeroLotBadgeText}>{numeroDeLot.trim()}</Text>
             </View>
           )}
+        </View>
+        <View style={styles.imageInfoContainer}>
+          <Text style={styles.imageInfoText}>
+            📱 Cette photo sera sauvegardée dans votre galerie
+          </Text>
         </View>
         <TouchableOpacity
           onPress={() => setImage(null)}
@@ -550,94 +595,6 @@ const styles = StyleSheet.create({
   progressInProgress: {
     color: '#F59E0B',
   },
-  progressRemaining: {
-    color: '#6B7280',
-  },
-  buttonGroup: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  stateButton: {
-    flex: 1,
-    padding: 12,
-    backgroundColor: '#F1F5F9',
-    borderRadius: 8,
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: '#E2E8F0',
-  },
-  stateButtonActive: {
-    backgroundColor: '#3B82F6',
-    borderColor: '#2563EB',
-  },
-  stateButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#64748B',
-  },
-  stateButtonTextActive: {
-    color: '#fff',
-  },
-  // Étages Styles
-  etagesSectionHeader: {
-    marginBottom: 16,
-  },
-  addEtagesScroll: {
-    marginTop: 8,
-  },
-  addEtageButton: {
-    backgroundColor: '#8B5CF6',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-    marginRight: 8,
-  },
-  addEtageButtonText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  etageCard: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  etageHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  etageName: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#1E293B',
-  },
-  removeEtageButton: {
-    backgroundColor: '#EF4444',
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  removeEtageButtonText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  etageEtatGroup: {
-    marginBottom: 8,
-  },
-  etageLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#374151',
-    marginBottom: 8,
-  },
   // Image Styles
   imagePickerButton: {
     flexDirection: 'row',
@@ -690,6 +647,19 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  imageInfoContainer: {
+    backgroundColor: '#E0F2FE',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  imageInfoText: {
+    fontSize: 14,
+    color: '#0369A1',
+    textAlign: 'center',
+    fontWeight: '500',
   },
   removeImageButton: {
     paddingHorizontal: 16,

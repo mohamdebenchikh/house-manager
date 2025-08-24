@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import * as FileSystem from 'expo-file-system';
+import * as MediaLibrary from 'expo-media-library';
 import { router } from "expo-router";
 import * as Sharing from 'expo-sharing';
 import React, { useState } from 'react';
@@ -25,12 +26,11 @@ interface Parcelle {
   nombreDeLogement: string;
   acheve: string;
   enCours: string;
-  image: { uri: string; name: string } | null;
+  image: { uri: string; name: string; assetId?: string } | null;
   createdAt: string;
 }
 
 const STORAGE_KEY = 'parcelles_data';
-const IMAGES_DIRECTORY = `${FileSystem.documentDirectory}parcelle_images/`;
 
 export default function Index() {
   const [parcelles, setParcelles] = useState<Parcelle[]>([]);
@@ -74,7 +74,27 @@ export default function Index() {
     setRefreshing(false);
   };
 
-  const deleteParcelle = async (parcelleId: string, imageUri?: string) => {
+  const deleteImageFromMediaLibrary = async (assetId?: string) => {
+    if (!assetId) return;
+    
+    try {
+      // Request media library permissions
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        console.warn('Media library permission not granted');
+        return;
+      }
+
+      // Delete the asset from media library
+      await MediaLibrary.deleteAssetsAsync([assetId]);
+      console.log('Image deleted from media library');
+    } catch (error) {
+      console.error('Error deleting image from media library:', error);
+      // Don't show error to user as this is not critical
+    }
+  };
+
+  const deleteParcelle = async (parcelleId: string, image?: { uri: string; name: string; assetId?: string }) => {
     Alert.alert(
       'Confirmer la suppression',
       'Êtes-vous sûr de vouloir supprimer cette parcelle? Cette action ne peut pas être annulée.',
@@ -94,12 +114,9 @@ export default function Index() {
               // Update AsyncStorage
               await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updatedParcelles));
               
-              // Delete image file if exists
-              if (imageUri) {
-                const fileInfo = await FileSystem.getInfoAsync(imageUri);
-                if (fileInfo.exists) {
-                  await FileSystem.deleteAsync(imageUri);
-                }
+              // Delete image from media library if it has an assetId
+              if (image?.assetId) {
+                await deleteImageFromMediaLibrary(image.assetId);
               }
               
               Alert.alert('Succès', 'Parcelle supprimée avec succès');
@@ -117,6 +134,30 @@ export default function Index() {
     );
   };
 
+  const deleteAllMediaLibraryImages = async () => {
+    try {
+      // Request media library permissions
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        console.warn('Media library permission not granted');
+        return;
+      }
+
+      // Get all assetIds from parcelles
+      const assetIds = parcelles
+        .map(parcelle => parcelle.image?.assetId)
+        .filter((assetId): assetId is string => Boolean(assetId));
+
+      if (assetIds.length > 0) {
+        await MediaLibrary.deleteAssetsAsync(assetIds);
+        console.log(`Deleted ${assetIds.length} images from media library`);
+      }
+    } catch (error) {
+      console.error('Error deleting images from media library:', error);
+      // Don't show error to user as this is not critical
+    }
+  };
+
   const deleteAllParcelles = async () => {
     Alert.alert(
       'Confirmer la suppression',
@@ -130,15 +171,11 @@ export default function Index() {
             try {
               setIsLoading(true);
               
+              // Delete all images from media library
+              await deleteAllMediaLibraryImages();
+              
               // Clear AsyncStorage
               await AsyncStorage.removeItem(STORAGE_KEY);
-              
-              // Clear images directory
-              const dirInfo = await FileSystem.getInfoAsync(IMAGES_DIRECTORY);
-              if (dirInfo.exists) {
-                await FileSystem.deleteAsync(IMAGES_DIRECTORY, { idempotent: true });
-                await FileSystem.makeDirectoryAsync(IMAGES_DIRECTORY, { intermediates: true });
-              }
               
               setParcelles([]);
               Alert.alert('Succès', 'Toutes les parcelles ont été supprimées');
@@ -184,6 +221,7 @@ export default function Index() {
         'Étages en Cours': parcelle.enCours || '',
         'Nom de l\'Image': parcelle.image?.name || 'Aucune image',
         'Contient une Image': parcelle.image ? 'Oui' : 'Non',
+        'Photo dans Galerie': parcelle.image?.assetId ? 'Oui' : 'Non',
         'Date d\'Ajout': formatDate(parcelle.createdAt),
         'ID Parcelle': parcelle.id
       }));
@@ -202,6 +240,7 @@ export default function Index() {
         { wch: 15 }, // Étages en Cours
         { wch: 20 }, // Nom de l'Image
         { wch: 18 }, // Contient une Image
+        { wch: 18 }, // Photo dans Galerie
         { wch: 25 }, // Date d'Ajout
         { wch: 20 }  // ID Parcelle
       ];
@@ -319,6 +358,12 @@ export default function Index() {
                   <View style={styles.lotNumberBadge}>
                     <Text style={styles.lotNumberBadgeText}>{parcelle.numeroDeLot}</Text>
                   </View>
+                  {/* Gallery Badge */}
+                  {parcelle.image.assetId && (
+                    <View style={styles.galleryBadge}>
+                      <Text style={styles.galleryBadgeText}>📱</Text>
+                    </View>
+                  )}
                 </View>
               ) : (
                 <View style={styles.noImageContainer}>
@@ -365,7 +410,7 @@ export default function Index() {
 
                 {/* Delete Button */}
                 <TouchableOpacity
-                  onPress={() => deleteParcelle(parcelle.id, parcelle.image?.uri)}
+                  onPress={() => deleteParcelle(parcelle.id, parcelle.image || undefined)}
                   style={styles.deleteButton}
                   activeOpacity={0.8}
                   disabled={isDeleting === parcelle.id}
@@ -590,6 +635,26 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
     fontWeight: 'bold',
+  },
+  galleryBadge: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    backgroundColor: '#10B981',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  galleryBadgeText: {
+    fontSize: 12,
   },
   parcelleInfo: {
     padding: 16,
